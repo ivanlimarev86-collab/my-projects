@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Реалистичный бой — прототип</title>
+<style>
+  :root{ --bg:#1a1410; --panel:#241b14; --ink:#e8dcc8; --muted:#9a8a73; --blood:#b3201a; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font-family:"Trebuchet MS",system-ui,sans-serif; overflow:hidden; }
+  #wrap{ display:flex; flex-direction:column; height:100%; }
+  #arena{ flex:1; width:100%; display:block; background:linear-gradient(#3a2c20,#241a12 60%,#1a120c); }
+  #hud{ position:absolute; top:0; left:0; right:0; display:flex; justify-content:space-between;
+    padding:8px; pointer-events:none; font-size:12px; }
+  .fighter{ width:46%; max-width:340px; background:rgba(20,14,9,.78); border:1px solid #4a3826;
+    border-radius:8px; padding:8px 10px; }
+  .fighter.r{ text-align:right; }
+  .name{ font-weight:bold; font-size:14px; letter-spacing:.5px; }
+  .bar{ height:7px; border-radius:4px; background:#33271c; margin:3px 0; overflow:hidden; }
+  .bar > i{ display:block; height:100%; }
+  .parts{ display:flex; gap:3px; margin-top:5px; flex-wrap:wrap; }
+  .fighter.r .parts{ justify-content:flex-end; }
+  .pp{ font-size:9px; padding:2px 5px; border-radius:4px; background:#33271c; color:var(--muted); }
+  #log{ position:absolute; bottom:54px; left:8px; right:8px; max-height:24%; overflow:hidden;
+    font-size:11px; color:var(--muted); text-shadow:0 1px 2px #000; pointer-events:none; }
+  #log div{ opacity:.9; }
+  #log b{ color:var(--ink); } #log .hit{ color:#ff7a5c; } #log .crit{ color:#ff3030; font-weight:bold; }
+  #log .def{ color:#79b8ff; } #log .die{ color:#ff3030; font-weight:bold; }
+  #ctrl{ display:flex; gap:8px; padding:8px; background:var(--panel); border-top:1px solid #4a3826; }
+  button{ flex:1; padding:11px 6px; font-size:13px; font-weight:bold; color:var(--ink);
+    background:#3a2c20; border:1px solid #5a4533; border-radius:8px; }
+  button:active{ background:#4a3826; }
+  #verdict{ position:absolute; top:42%; left:0; right:0; text-align:center; font-size:26px;
+    font-weight:bold; color:#ffd27a; text-shadow:0 2px 8px #000; pointer-events:none; opacity:0;
+    transition:opacity .4s; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="arena"></canvas>
+  <div id="hud">
+    <div class="fighter l" id="hudA"></div>
+    <div class="fighter r" id="hudB"></div>
+  </div>
+  <div id="verdict"></div>
+  <div id="log"></div>
+  <div id="ctrl">
+    <button id="bNew">⚔ Новый бой</button>
+    <button id="bSlow">🐢 Замедление</button>
+    <button id="bPause">⏸ Пауза</button>
+  </div>
+</div>
+<script>
+/* ============================================================================
+   ДВИЖОК БОЯ  —  чистая логика, ничего не знает про графику.
+   Идея: симулируем ТЕЛО, а не «полоску HP». Урон идёт в конкретную часть тела,
+   у части свои последствия (кровотечение, потеря функции). Каждый солдат —
+   автономный NPC со своим «мозгом», навыками, выносливостью, болью и моралью.
+   ============================================================================ */
+
+const rnd  = (a,b)=> a + Math.random()*(b-a);
+const rint = (a,b)=> Math.floor(rnd(a,b+1));
+const clamp= (v,a,b)=> v<a?a:v>b?b:v;
+const chance=(p)=> Math.random()<p;
+const pick = (arr)=> arr[rint(0,arr.length-1)];
+
+// --- Шаблон тела: доля попаданий + порог «выведения из строя» + летальность ---
+const BODY = {
+  head:    { max:30,  lethal:true,  label:'Голова'  },
+  torso:   { max:80,  lethal:true,  label:'Торс'    },
+  rightArm:{ max:35,  lethal:false, label:'Пр.рука' },
+  leftArm: { max:35,  lethal:false, label:'Лев.рука'},
+  rightLeg:{ max:45,  lethal:false, label:'Пр.нога' },
+  leftLeg: { max:45,  lethal:false, label:'Лев.нога'},
+};
+
+// --- Приёмы (заготовка под 10–12; стартуем с базового набора). ---
+// aim — распределение «куда метит», dmg — базовый урон, wind — замах(сек),
+// recover — откат, reach — дистанция, stam — расход сил, pierce — пробитие.
+const MOVES = [
+  { id:'slash',   name:'рубящий',     dmg:[10,16], wind:.35, recover:.45, reach:62, stam:9,  pierce:1.0,
+    aim:{torso:.45,rightArm:.2,leftArm:.2,head:.1,rightLeg:.025,leftLeg:.025} },
+  { id:'overhead',name:'наотмашь',    dmg:[16,26], wind:.6,  recover:.65, reach:60, stam:15, pierce:1.1,
+    aim:{head:.5,torso:.3,rightArm:.1,leftArm:.1} },
+  { id:'thrust',  name:'укол',        dmg:[12,20], wind:.4,  recover:.5,  reach:74, stam:11, pierce:1.6,
+    aim:{torso:.6,head:.15,rightArm:.1,leftArm:.1,rightLeg:.025,leftLeg:.025} },
+  { id:'jab',     name:'быстрый тычок',dmg:[5,9],  wind:.18, recover:.28, reach:64, stam:5,  pierce:1.2,
+    aim:{torso:.4,head:.25,rightArm:.175,leftArm:.175} },
+  { id:'lowcut',  name:'подсечка',    dmg:[9,15],  wind:.4,  recover:.5,  reach:60, stam:10, pierce:1.0,
+    aim:{rightLeg:.42,leftLeg:.42,torso:.16} },
+  { id:'bash',    name:'удар плашмя', dmg:[4,7],   wind:.3,  recover:.4,  reach:54, stam:8,  pierce:.6, stagger:true,
+    aim:{head:.4,torso:.6} },
+];
+
+let UID = 0;
+function makeSoldier(opts){
+  const s = {
+    id:++UID, name:opts.name, side:opts.side, color:opts.color,
+    // Статы NPC (0..1 где это навык). Расы/уровни потом меняют эти числа.
+    level: opts.level||1,
+    str:   opts.str   ?? rnd(.7,1.15),   // сила -> урон
+    spd:   opts.spd   ?? rnd(.8,1.15),   // скорость -> передвижение/реакция
+    skill: opts.skill ?? rnd(.45,.85),   // владение оружием -> точность/защита
+    pain:  0, painTol: opts.painTol ?? rnd(.8,1.2),
+    morale:1, stamina:100, maxStam:100,
+    blood:100,                            // истекает от кровотечений
+    parts:{}, bleedTotal:0,
+    state:'approach', actTimer:0, move:null, target:null,
+    x:opts.x, dir:opts.side==='L'?1:-1, vx:0,
+    anim:{t:0, type:'idle', lunge:0, flinch:0}, dead:false, fled:false,
+  };
+  for(const k in BODY) s.parts[k]={ hp:BODY[k].max, max:BODY[k].max, bleed:0, disabled:false, severed:false };
+  return s;
+}
+
+// --- Производные способности от состояния тела (вот тут «реализм») ---
+function caps(s){
+  const p=s.parts;
+  const armOK = !p.rightArm.disabled ? 1 : (!p.leftArm.disabled ? .55 : .15); // дерётся другой рукой / почти не может
+  const defArm= !p.leftArm.disabled ? 1 : (!p.rightArm.disabled ? .7 : .3);
+  const legs  = (p.rightLeg.disabled?0:.5)+(p.leftLeg.disabled?0:.5);          // 1, .5 или 0
+  const stamF = .35 + .65*(s.stamina/s.maxStam);
+  const bloodF= .4 + .6*(s.blood/100);
+  const painF = clamp(1 - (s.pain/ (140*s.painTol)), .35, 1);
+  return {
+    attack:  s.str * armOK * stamF * painF * bloodF,
+    defense: s.skill * defArm * stamF * painF * (legs>0?1:.6),
+    move:    s.spd * (legs===1?1:legs===.5?.55:0) * stamF * bloodF,
+    canFight: armOK>.1 && (p.head.hp>0) && (p.torso.hp>0),
+  };
+}
+
+// --- Нанесение удара по части тела ---
+function applyHit(att, def, move, log){
+  // выбор части: метим по распределению приёма, но низкий навык = больше разброс
+  let part = weightedPart(move.aim);
+  if(chance(.35*(1-att.skill))) part = pick(Object.keys(BODY)); // мазня по навыку
+  const P = def.parts[part];
+
+  let dmg = rnd(move.dmg[0],move.dmg[1]) * caps(att).attack * (move.pierce);
+  dmg *= rnd(.85,1.15);
+  // удачный/неудачный угол
+  const crit = chance(.08+att.skill*.07);
+  if(crit) dmg*=1.7;
+  dmg = Math.round(dmg);
+
+  P.hp = clamp(P.hp-dmg,0,P.max);
+
+  // кровотечение пропорционально урону (рубящие/уколы кровят сильнее тычков)
+  const bleedAdd = (dmg/P.max) * (move.id==='bash'?2:9);
+  P.bleed += bleedAdd;
+
+  // боль
+  def.pain += dmg * (BODY[part].lethal?1.4:1.0);
+
+  let tag = crit?'crit':'hit';
+  let note = `${att.name} — ${move.name} в <b>${BODY[part].label.toLowerCase()}</b> (${dmg})`;
+
+  // вывод части из строя / отсечение
+  if(P.hp<=0 && !P.disabled){
+    P.disabled=true;
+    if(!BODY[part].lethal && dmg>P.max*.7 && chance(.4)){ P.severed=true; P.bleed+=14;
+      note += ` — <span class="crit">КОНЕЧНОСТЬ ОТСЕЧЕНА!</span>`; }
+    else note += ` — <span class="crit">ВЫВЕДЕНА ИЗ СТРОЯ</span>`;
+    if(part==='rightArm' || part==='leftArm') note += `, оружие ослаблено`;
+    if(part==='rightLeg'|| part==='leftLeg')  note += `, теряет подвижность`;
+  }
+  log(note, tag);
+
+  // мгновенная смерть от критичных зон
+  if(BODY[part].lethal && P.hp<=0){ kill(def, part==='head'?'удар в голову':'пробитый торс', log); }
+
+  // оглушение/спотыкание
+  def.anim.flinch=.25;
+  if(move.stagger && chance(.5)){ def.state='stagger'; def.actTimer=.6; log(`${def.name} оглушён`, 'def'); }
+}
+
+function weightedPart(aim){
+  let r=Math.random(), acc=0;
+  for(const k in aim){ acc+=aim[k]; if(r<=acc) return k; }
+  return 'torso';
+}
+
+function kill(s, reason, log){
+  if(s.dead) return;
+  s.dead=true; s.state='dead'; s.anim.type='dead'; s.anim.t=0;
+  log(`<span class="die">☠ ${s.name} погибает: ${reason}.</span>`, 'die');
+}
+
+// --- ИИ: один тик решений ---
+function think(s, foe, dt, log){
+  if(s.dead||s.fled) return;
+  const c = caps(s);
+
+  // истечение кровью
+  s.bleedTotal=0; for(const k in s.parts){ s.parts[k].bleed=Math.max(0,s.parts[k].bleed); s.bleedTotal+=s.parts[k].bleed; }
+  s.blood = clamp(s.blood - s.bleedTotal*dt*0.6, 0, 100);
+  if(s.blood<=0){ kill(s,'истёк кровью', log); return; }
+
+  // боль/выносливость восстанавливаются медленно, боль спадает
+  s.pain = Math.max(0, s.pain - 6*dt);
+  if(s.state!=='attack') s.stamina = clamp(s.stamina + 14*dt, 0, s.maxStam);
+
+  // мораль: тяжёлые раны и кровопотеря ломают дух
+  const woundLoad = (1-s.blood/100)*.6 + (s.pain/(160*s.painTol))*.4
+                  + (s.parts.rightArm.disabled||s.parts.leftArm.disabled?.15:0);
+  s.morale = clamp(1 - woundLoad, 0, 1);
+  if(s.morale<.12 && chance(.3*dt) && !s.dead){ s.fled=true; s.state='flee';
+    log(`<b>${s.name}</b> ломается и пытается бежать!`, 'def'); return; }
+
+  if(!c.canFight){ // не может драться — оседает
+    if(s.state!=='down'){ s.state='down'; log(`${s.name} больше не может сражаться.`,'def'); }
+    return;
+  }
+
+  const dist = Math.abs(s.x - foe.x);
+  s.anim.t += dt;
+
+  switch(s.state){
+    case 'approach': {
+      const reach = (s.move? 56: 56);
+      if(dist > reach){ s.vx = s.dir * (40+70*c.move); s.anim.type='walk'; }
+      else { s.vx=0; // в зоне удара — решаем атаковать/защищаться
+        if(s.stamina<12){ s.state='recover'; s.actTimer=.5; break; }
+        // выбор приёма: раненую цель добиваем по слабому месту
+        const m = chooseMove(s, foe);
+        s.move=m; s.state='windup'; s.actTimer=m.wind; s.anim.type='windup';
+      }
+      break; }
+    case 'windup': {
+      s.actTimer-=dt; s.anim.lunge=clamp(1-(s.actTimer/s.move.wind),0,1);
+      if(s.actTimer<=0){
+        // защита соперника: блок/парир/уворот по навыку и состоянию
+        const d=caps(foe).defense, df=foe;
+        const guard = df.state!=='stagger' && df.state!=='down' && !df.dead;
+        let defended=false, how='';
+        if(guard){
+          const pPar=clamp(.10+ d*.30 - s.move.pierce*.06, .03,.6);
+          const pBlk=clamp(.10+ d*.22, .03,.5);
+          const pDdg=clamp(.06+ caps(df).move*.10, .02,.35);
+          if(chance(pDdg)){ defended=true; how='уворот'; df.anim.lunge=-.3; }
+          else if(chance(pPar)){ defended=true; how='парирование'; }
+          else if(chance(pBlk)){ defended=true; how='блок'; }
+        }
+        s.stamina=clamp(s.stamina-s.move.stam,0,s.maxStam);
+        s.anim.type='strike'; s.anim.t=0;
+        if(defended){ log(`${df.name}: <span class="def">${how}</span> против «${s.move.name}»`, 'def');
+          if(how==='парирование' && chance(.3)){ df.stamina+=6; } }
+        else { applyHit(s, foe, s.move, log); }
+        s.state='recover'; s.actTimer=s.move.recover;
+      }
+      break; }
+    case 'recover': {
+      s.actTimer-=dt; s.anim.type='idle';
+      if(s.actTimer<=0) s.state='approach';
+      break; }
+    case 'stagger': {
+      s.actTimer-=dt; s.anim.type='flinch'; if(s.actTimer<=0) s.state='approach'; break; }
+  }
+}
+
+function chooseMove(s, foe){
+  // если у врага разбита нога — бьём по корпусу/голове; если открыт — добиваем
+  const fp=foe.parts;
+  const pool=[];
+  for(const m of MOVES){
+    let w=1;
+    if(s.stamina < m.stam*1.2) w*=.2;            // мало сил — реже тяжёлые
+    if(m.id==='overhead') w*= .6+ s.skill*.6;     // мощные требуют навыка
+    if(m.id==='lowcut' && (fp.rightLeg.disabled&&fp.leftLeg.disabled)) w*=.2;
+    if((fp.head.hp<14||fp.torso.hp<25) && (m.id==='thrust'||m.id==='overhead')) w*=2.2; // добить
+    pool.push([m,w]);
+  }
+  let tot=pool.reduce((a,[,w])=>a+w,0), r=Math.random()*tot;
+  for(const [m,w] of pool){ r-=w; if(r<=0) return m; }
+  return MOVES[0];
+}
+
+/* ============================================================================
+   РЕНДЕР  —  отдельно от движка. Простая боковая «болванчик»-анимация.
+   ============================================================================ */
+const cv=document.getElementById('arena'), ctx=cv.getContext('2d');
+let W,H,ground;
+function resize(){ const r=cv.getBoundingClientRect(); cv.width=r.width*devicePixelRatio;
+  cv.height=r.height*devicePixelRatio; ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  W=r.width; H=r.height; ground=H*0.82; }
+addEventListener('resize',resize);
+
+let blood=[]; // частицы крови
+function splat(x,y,n,col){ for(let i=0;i<n;i++) blood.push({x,y,
+  vx:rnd(-90,90), vy:rnd(-160,-30), life:rnd(.5,1.2), col:col||'#a01510', r:rnd(1.5,3.5)}); }
+
+function partColor(p){ const f=p.hp/p.max;
+  if(p.severed||p.disabled) return '#5a1410';
+  return `rgb(${Math.round(120+135*(1-f))},${Math.round(150*f)},${Math.round(90*f)})`; }
+
+function drawFighter(s){
+  const base=s.x, gy=ground;
+  const a=s.anim; const lung=(a.type==='strike'?14:a.lunge*8)*s.dir;
+  const bob=Math.sin(a.t*8)* (a.type==='walk'?3:1);
+  const fall = s.dead? Math.min(1,a.t*2):0;
+  ctx.save(); ctx.translate(base+lung, gy);
+  if(fall>0){ ctx.rotate(s.dir*1.4*fall); ctx.translate(0, -10*fall); }
+
+  const P=s.parts, D=s.dir;
+  const lw=6;
+  const seg=(x1,y1,x2,y2,col,w)=>{ ctx.strokeStyle=col; ctx.lineWidth=w||lw; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); };
+
+  // ноги
+  const legSwing=(a.type==='walk')?Math.sin(a.t*8)*8:3;
+  seg(0,-34, -6*D, -bob+legSwing, partColor(P.leftLeg));
+  seg(0,-34,  6*D, -bob-legSwing, partColor(P.rightLeg));
+  // торс
+  seg(0,-34, 0,-64+bob, partColor(P.torso), 8);
+  // левая рука (щитовая)
+  seg(0,-58, -10*D, -44+bob, partColor(P.leftArm));
+  // правая рука + оружие
+  const sw = a.type==='strike'? -1.1 : a.type==='windup'? .9 - a.lunge*1.6 : .2;
+  const hx=14*D*Math.cos(sw), hy=-58 - 14*Math.sin(sw)*0 -10 + 14*Math.sin(sw);
+  seg(0,-58, hx, hy, partColor(P.rightArm));
+  // оружие (меч)
+  if(!P.rightArm.severed){ const ang=sw + (D>0?-.3:Math.PI+.3);
+    seg(hx,hy, hx+Math.cos(ang)*34*D*0+Math.cos(D>0?sw-1:Math.PI-sw+1)*34,
+        hy+Math.sin(D>0?sw-1:Math.PI-sw+1)*34, '#d8d2c4', 3); }
+  // голова
+  ctx.fillStyle=partColor(P.head); ctx.beginPath(); ctx.arc(0,-72+bob,8,0,7); ctx.fill();
+  // плащ-цвет стороны
+  ctx.fillStyle=s.color; ctx.globalAlpha=.5; ctx.beginPath();
+  ctx.moveTo(0,-64+bob); ctx.lineTo(-7*D,-40); ctx.lineTo(2*D,-40); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha=1;
+  // тень от боли/флинча
+  if(a.flinch>0){ a.flinch-=.016; }
+  ctx.restore();
+
+  // брызги при ударе по этому бойцу
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // земля
+  ctx.fillStyle='#2a1d12'; ctx.fillRect(0,ground,W,H-ground);
+  ctx.strokeStyle='#3c2c1c'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(0,ground); ctx.lineTo(W,ground); ctx.stroke();
+  // кровь
+  for(const b of blood){ ctx.globalAlpha=clamp(b.life,0,1); ctx.fillStyle=b.col;
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,7); ctx.fill(); }
+  ctx.globalAlpha=1;
+  drawFighter(A); drawFighter(B);
+}
+
+/* ============================================================================
+   ЦИКЛ
+   ============================================================================ */
+let A,B, paused=false, slow=false, last=0, over=false;
+const logEl=document.getElementById('log'); let logLines=[];
+function log(html, cls){ logLines.unshift(`<div class="${cls||''}">${html}</div>`);
+  logLines=logLines.slice(0,9); logEl.innerHTML=logLines.join(''); }
+
+function spawn(){
+  UID=0;
+  A=makeSoldier({name:'Рыцарь А', side:'L', color:'#3a7bd5', x:W*0.28});
+  B=makeSoldier({name:'Рыцарь Б', side:'R', color:'#d54a3a', x:W*0.72});
+  A.x=W*0.22; B.x=W*0.78; blood=[]; logLines=[]; logEl.innerHTML=''; over=false;
+  document.getElementById('verdict').style.opacity=0;
+  log('Бой начался. Два рыцаря сходятся.', '');
+}
+
+function hud(){
+  const row=(s)=>{
+    const stat=(c,v)=>`<div class="bar"><i style="width:${clamp(v,0,100)}%;background:${c}"></i></div>`;
+    let parts=''; for(const k in s.parts){ const p=s.parts[k];
+      const col=p.disabled?'#5a1410':p.hp/p.max>.5?'#3c7d3c':p.hp/p.max>.2?'#b8902a':'#b3201a';
+      parts+=`<span class="pp" style="background:${col};color:#1a1410">${BODY[k].label}</span>`; }
+    return `<div class="name">${s.name} ${s.dead?'☠':''}</div>
+      <div style="font-size:10px;color:var(--muted)">Кровь</div>${stat('#b3201a',s.blood)}
+      <div style="font-size:10px;color:var(--muted)">Силы / Мораль</div>
+      ${stat('#caa84a',s.stamina)}${stat('#79b8ff',s.morale*100)}
+      <div class="parts">${parts}</div>`;
+  };
+  document.getElementById('hudA').innerHTML=row(A);
+  document.getElementById('hudB').innerHTML=row(B);
+}
+
+function checkEnd(){
+  if(over) return;
+  const aOut=A.dead||A.fled||A.state==='down', bOut=B.dead||B.fled||B.state==='down';
+  if(aOut||bOut){ over=true; const v=document.getElementById('verdict');
+    let txt = aOut&&bOut? 'Оба пали' : aOut? `Победил ${B.name}` : `Победил ${A.name}`;
+    v.textContent='🏆 '+txt; v.style.opacity=1; log(`<b>${txt}.</b>`,'die'); }
+}
+
+function loop(ts){
+  requestAnimationFrame(loop);
+  let dt=(ts-last)/1000; last=ts; if(dt>.05) dt=.05; if(slow) dt*=.3;
+  if(!paused && !over){
+    think(A,B,dt,log); think(B,A,dt,log);
+    // движение + столкновение
+    A.x+=A.vx*dt*A.dir* (A.state==='flee'?-1:1);
+    B.x+=B.vx*dt*B.dir* (B.state==='flee'?-1:1);
+    const minGap=64;
+    if(B.x-A.x<minGap){ const mid=(A.x+B.x)/2; A.x=mid-minGap/2; B.x=mid+minGap/2; }
+    A.x=clamp(A.x,20,W-20); B.x=clamp(B.x,20,W-20);
+    // брызги при свежих ранах
+    for(const s of [A,B]) for(const k in s.parts){ const p=s.parts[k];
+      if(p.bleed>0 && chance(p.bleed*dt*1.2)) splat(s.x, ground-rnd(20,70), 1); }
+    checkEnd();
+  }
+  // частицы
+  for(const b of blood){ b.x+=b.vx*dt; b.vy+=400*dt; b.y+=b.vy*dt; b.life-=dt;
+    if(b.y>ground){ b.y=ground; b.vy=0; b.vx*=.7; } }
+  blood=blood.filter(b=>b.life>0);
+  draw(); hud();
+}
+
+document.getElementById('bNew').onclick=()=>{ spawn(); };
+document.getElementById('bPause').onclick=(e)=>{ paused=!paused; e.target.textContent=paused?'▶ Дальше':'⏸ Пауза'; };
+document.getElementById('bSlow').onclick=(e)=>{ slow=!slow; e.target.style.background=slow?'#5a4533':'#3a2c20'; };
+
+resize(); spawn(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
