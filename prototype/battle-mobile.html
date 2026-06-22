@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Disciples — мобильный бой (прототип)</title>
+<style>
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; margin:0; }
+  html,body{ height:100%; background:#0e0b08; overflow:hidden;
+    font-family:"Trebuchet MS",system-ui,sans-serif; color:#eaddc4; }
+  #wrap{ display:flex; flex-direction:column; height:100%; max-width:480px; margin:0 auto; }
+  #field{ flex:1; width:100%; display:block; touch-action:none; }
+  #top{ position:absolute; top:0; left:0; right:0; display:flex; justify-content:center;
+    gap:10px; padding:6px; font-size:13px; font-weight:bold; pointer-events:none; }
+  #top .pill{ background:rgba(0,0,0,.45); border:1px solid #4a3826; border-radius:20px;
+    padding:4px 12px; }
+  #ctrl{ display:flex; gap:6px; padding:7px; background:#1c150e; border-top:1px solid #4a3826; }
+  button{ flex:1; padding:11px 4px; font-size:13px; font-weight:bold; color:#eaddc4;
+    background:#3a2c20; border:1px solid #5a4533; border-radius:9px; }
+  button:active{ background:#4a3826; }
+  #ctrl .on{ background:#6a5030; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="field"></canvas>
+  <div id="top"><div class="pill" id="score">Битва</div></div>
+  <div id="ctrl">
+    <button id="bSpeed">▶ x1</button>
+    <button id="bPause">⏸ Пауза</button>
+    <button id="bL">＋ синие</button>
+    <button id="bR">＋ красные</button>
+    <button id="bReset">⟳ Заново</button>
+  </div>
+</div>
+<script>
+"use strict";
+/* ============================================================================
+   Прототип боя для МОБИЛЬНОГО lane/tower-battler (формат VR Warriors / Decibels).
+   Портрет, две базы с HP, спавн волнами, мелкие силуэты сходятся и дерутся по
+   РЕАЛИСТИЧНОЙ модели тела (раны по частям, кровотечение, выбивание оружия,
+   добивание). Всё в МИРОВЫХ единицах -> worldToScreen. Логика отделена от рендера.
+   Для продакшена этот файл бьётся на модули из TZ-combat-engine.md (§10).
+   ============================================================================ */
+
+// ---------- утилиты ----------
+const rnd=(a,b)=>a+Math.random()*(b-a), rint=(a,b)=>Math.floor(rnd(a,b+1));
+const clamp=(v,a,b)=>v<a?a:v>b?b:v, chance=p=>Math.random()<p, pick=a=>a[rint(0,a.length-1)];
+const dist=(ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
+
+/* ============================================================================
+   §3–4 БОЕВАЯ МОДЕЛЬ (масштабонезависима; дистанции в мировых единицах)
+   ============================================================================ */
+const BODY = {
+  head:    { max:24, lethal:true,  label:'голова'   },
+  torso:   { max:60, lethal:true,  label:'торс'     },
+  rightArm:{ max:28, lethal:false, label:'пр.рука'  },
+  leftArm: { max:28, lethal:false, label:'лев.рука' },
+  rightLeg:{ max:34, lethal:false, label:'пр.нога'  },
+  leftLeg: { max:34, lethal:false, label:'лев.нога' },
+};
+// приёмы (data-driven подмножество; reach/stam в мировых единицах)
+const MOVES = [
+  {id:'slash',   dmg:[8,13], wind:.34,rec:.42,reach:13,stam:9, pierce:1.0,
+    aim:{torso:.45,rightArm:.2,leftArm:.2,head:.1,rightLeg:.025,leftLeg:.025}},
+  {id:'overhead',dmg:[14,22],wind:.55,rec:.6, reach:12,stam:15,pierce:1.1,
+    aim:{head:.5,torso:.3,rightArm:.1,leftArm:.1}},
+  {id:'thrust',  dmg:[10,16],wind:.4, rec:.48,reach:15,stam:11,pierce:1.6,
+    aim:{torso:.6,head:.15,rightArm:.1,leftArm:.1,rightLeg:.025,leftLeg:.025}},
+  {id:'jab',     dmg:[4,7],  wind:.18,rec:.26,reach:13,stam:5, pierce:1.2,
+    aim:{torso:.4,head:.25,rightArm:.175,leftArm:.175}},
+  {id:'lowcut',  dmg:[7,12], wind:.4, rec:.48,reach:12,stam:10,pierce:1.0,
+    aim:{rightLeg:.42,leftLeg:.42,torso:.16}},
+  {id:'bash',    dmg:[3,6],  wind:.3, rec:.4, reach:11,stam:8, pierce:.6, stagger:true,
+    aim:{head:.4,torso:.6}},
+];
+const moveName={slash:'рубящий',overhead:'наотмашь',thrust:'укол',jab:'тычок',lowcut:'подсечка',bash:'оглушение'};
+
+function caps(u){
+  const p=u.parts;
+  const armOK=!p.rightArm.disabled?1:(!p.leftArm.disabled?.55:.15);
+  const defArm=!p.leftArm.disabled?1:(!p.rightArm.disabled?.7:.3);
+  const legs=(p.rightLeg.disabled?0:.5)+(p.leftLeg.disabled?0:.5);
+  const stamF=.35+.65*(u.stamina/u.maxStam);
+  const bloodF=.4+.6*(u.blood/100);
+  const painF=clamp(1-(u.pain/(120*u.painTol)),.35,1);
+  const fist=u.disarmed?.45:1;             // без оружия бьёт слабее
+  return {
+    attack:u.str*armOK*stamF*painF*bloodF*fist,
+    defense:u.skill*defArm*stamF*painF*(legs>0?1:.6),
+    move:u.spd*(legs===1?1:legs===.5?.55:0)*stamF*bloodF,
+    canFight:armOK>.1 && p.head.hp>0 && p.torso.hp>0,
+  };
+}
+function weightedPart(aim){ let r=Math.random(),a=0; for(const k in aim){a+=aim[k]; if(r<=a)return k;} return 'torso'; }
+
+function applyHit(att,def,move){
+  let part=weightedPart(move.aim);
+  if(chance(.35*(1-att.skill))) part=pick(Object.keys(BODY));
+  const P=def.parts[part];
+  let dmg=rnd(move.dmg[0],move.dmg[1])*caps(att).attack*move.pierce*rnd(.85,1.15);
+  const crit=chance(.08+att.skill*.07); if(crit) dmg*=1.7;
+  dmg=Math.round(dmg);
+  P.hp=clamp(P.hp-dmg,0,P.max);
+  P.bleed+=(dmg/P.max)*(move.id==='bash'?2:9);
+  def.pain+=dmg*(BODY[part].lethal?1.4:1);
+  def.flinch=.22;
+  fx.splat(def.sx, def.sy-rnd(6,18)*sc, crit?6:3);
+  if(P.hp<=0 && !P.disabled){
+    P.disabled=true;
+    if(!BODY[part].lethal && dmg>P.max*.7 && chance(.4)){ P.severed=true; P.bleed+=14; }
+  }
+  if(BODY[part].lethal && P.hp<=0) kill(def, part==='head'?'удар в голову':'пробитый торс');
+  if(move.stagger && chance(.5)){ def.state='stagger'; def.timer=.5; }
+}
+function kill(u,reason){ if(u.dead)return; u.dead=true; u.state='dead'; u.anim=0;
+  fx.splat(u.sx,u.sy-10*sc,8); stats[u.side==='L'?'rKills':'lKills']++; }
+
+// выбивание оружия при удачном парировании
+function tryDisarm(att,def){
+  if(def.disarmed) return false;
+  if(chance(.10+caps(def).defense*.12)){
+    def.disarmed=true;
+    drops.push({x:def.x+def.dir*4, y:def.y, vy:-2, t:0, weapon:'sword'});
+    return true;
+  }
+  return false;
+}
+
+/* ============================================================================
+   ЮНИТ + §D ИИ (advance по дорожке -> fight при встрече врага -> бьёт базу)
+   ============================================================================ */
+let UID=0;
+function makeUnit(side){
+  const u={ id:++UID, side, dir:side==='L'?1:-1, dead:false, disarmed:false,
+    level:1, str:rnd(.75,1.15), spd:rnd(.85,1.15), skill:rnd(.45,.85),
+    pain:0, painTol:rnd(.8,1.2), morale:1, stamina:100, maxStam:100, blood:100,
+    parts:{}, bleedTotal:0, state:'advance', timer:0, move:null, target:null,
+    x:0, y:0, sx:0, sy:0, flinch:0, anim:0, animType:'walk' };
+  for(const k in BODY) u.parts[k]={hp:BODY[k].max,max:BODY[k].max,bleed:0,disabled:false,severed:false};
+  // позиция спавна у своей базы + разброс по «рядам»
+  u.x = side==='L'? world.leftBase.x+rnd(4,10) : world.rightBase.x-rnd(4,10);
+  u.y = world.laneY + rnd(-world.laneH/2, world.laneH/2);
+  return u;
+}
+function enemyBase(u){ return u.side==='L'? world.rightBase : world.leftBase; }
+function findTarget(u){
+  let best=null, bd=1e9;
+  for(const e of units){ if(e.dead||e.side===u.side) continue;
+    const d=dist(u.x,u.y,e.x,e.y); if(d<bd){bd=d; best=e;} }
+  return bd< world.detect ? best : null;
+}
+function chooseMove(u,foe){
+  const fp=foe.parts, pool=[];
+  for(const m of MOVES){ let w=1;
+    if(u.stamina<m.stam*1.2) w*=.2;
+    if(m.id==='overhead') w*=.6+u.skill*.6;
+    if((fp.head.hp<10||fp.torso.hp<18)&&(m.id==='thrust'||m.id==='overhead')) w*=2.2;
+    if(foe.state==='prone'&&m.id==='thrust') w*=3;
+    pool.push([m,w]); }
+  let t=pool.reduce((a,[,w])=>a+w,0), r=Math.random()*t;
+  for(const[m,w]of pool){ r-=w; if(r<=0)return m; } return MOVES[0];
+}
+
+function think(u,dt){
+  if(u.dead){ u.anim+=dt; return; }
+  // кровопотеря -> «жизнь» угасает
+  u.bleedTotal=0; for(const k in u.parts){ const p=u.parts[k]; p.bleed=Math.max(0,p.bleed-0.05*dt); u.bleedTotal+=p.bleed; }
+  u.blood=clamp(u.blood-u.bleedTotal*dt*0.5,0,100);
+  if(u.blood<=0){ kill(u,'истёк кровью'); return; }
+  u.pain=Math.max(0,u.pain-6*dt);
+  if(u.state!=='fight') u.stamina=clamp(u.stamina+12*dt,0,u.maxStam);
+  if(u.flinch>0) u.flinch-=dt;
+  const c=caps(u);
+
+  if(!c.canFight){ if(u.state!=='prone'){u.state='prone'; u.timer=99;} return; }
+
+  // цель
+  if(!u.target || u.target.dead) u.target=findTarget(u);
+
+  if(u.target){
+    const foe=u.target, d=dist(u.x,u.y,foe.x,foe.y);
+    // подойти на дистанцию удара
+    const reach=(u.move?14:14);
+    if(d>reach){ stepToward(u, foe.x, foe.y, c.move, dt); u.animType='walk'; u.state='advance'; return; }
+    // безоружный рядом с дропом — подобрать
+    if(u.disarmed) tryPickup(u);
+    // бой
+    fightTick(u,foe,dt);
+    return;
+  }
+
+  // нет врагов: идти к базе врага, при достижении — бить базу
+  const eb=enemyBase(u);
+  if(Math.abs(u.x-eb.x) > world.baseReach){ stepToward(u, eb.x, u.y, c.move, dt); u.animType='walk'; u.state='advance'; }
+  else { // атака базы
+    u.animType='strike'; u.state='hitbase';
+    u.timer-=dt; if(u.timer<=0){ u.timer=.6; eb.hp=Math.max(0,eb.hp-rnd(6,11)*c.attack); u.anim=0;
+      fx.spark(eb.x*scaleX()+ox, world.laneY*sc+oy); } }
+}
+function stepToward(u,tx,ty,spd,dt){
+  const dx=tx-u.x, dy=ty-u.y, len=Math.hypot(dx,dy)||1;
+  const v=(8+10*spd);                  // мировая скорость
+  u.x+=dx/len*v*dt; u.y+=dy/len*v*dt*0.6;
+  u.y=clamp(u.y, world.laneY-world.laneH/2, world.laneY+world.laneH/2);
+  u.anim+=dt;
+}
+function fightTick(u,foe,dt){
+  u.anim+=dt;
+  switch(u.state){
+    case 'advance': case 'hitbase': u.state='ready'; u.timer=0; break;
+    case 'ready': {
+      if(u.stamina<10){ u.state='recover'; u.timer=.5; break; }
+      u.move=chooseMove(u,foe); u.state='windup'; u.timer=u.move.wind; u.animType='windup'; u.anim=0; break; }
+    case 'windup': {
+      u.timer-=dt;
+      if(u.timer<=0){
+        const df=foe, d=caps(df).defense;
+        const guard = !df.dead && df.state!=='stagger' && df.state!=='prone';
+        let defended=false, parried=false;
+        if(guard){
+          const pPar=clamp(.10+d*.30-u.move.pierce*.06,.03,.55);
+          const pBlk=clamp(.10+d*.22,.03,.45);
+          const pDdg=clamp(.06+caps(df).move*.10,.02,.3);
+          if(chance(pDdg)){defended=true;}
+          else if(chance(pPar)){defended=true; parried=true;}
+          else if(chance(pBlk)){defended=true;}
+        }
+        u.stamina=clamp(u.stamina-u.move.stam,0,u.maxStam);
+        u.animType='strike'; u.anim=0;
+        if(defended){ fx.spark(((u.x+foe.x)/2)*scaleX()+ox, world.laneY*sc+oy - 8*sc);
+          if(parried) tryDisarm(u,foe); }
+        else applyHit(u,foe,u.move);
+        u.state='recover'; u.timer=u.move.rec;
+      } break; }
+    case 'recover': u.timer-=dt; u.animType='idle'; if(u.timer<=0) u.state='ready'; break;
+    case 'stagger': u.timer-=dt; u.animType='flinch'; if(u.timer<=0) u.state='ready'; break;
+  }
+}
+function tryPickup(u){
+  for(const d of drops){ if(d.taken) continue;
+    if(Math.abs(d.x-u.x)<6 && Math.abs(d.y-u.y)<6){ d.taken=true; u.disarmed=false; return; } }
+}
+
+/* ============================================================================
+   §8 РЕНДЕР: мировые координаты -> экран, мелкие силуэты
+   ============================================================================ */
+const cv=document.getElementById('field'), ctx=cv.getContext('2d');
+let W,H,sc,ox,oy; // sc = px на мировую единицу; ox/oy — сдвиг
+const world={ wWidth:200, wHeight:0, leftBase:{x:18,hp:1000,max:1000}, rightBase:{x:182,hp:1000,max:1000},
+  laneY:0, laneH:46, detect:26, baseReach:12 };
+function scaleX(){ return sc; }
+function resize(){
+  const r=cv.getBoundingClientRect(); cv.width=r.width*devicePixelRatio; cv.height=r.height*devicePixelRatio;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); W=r.width; H=r.height;
+  // вписываем мир по ширине
+  sc=W/world.wWidth; ox=0; oy=0;
+  world.wHeight=H/sc; world.laneY=world.wHeight*0.46; world.laneH=world.wHeight*0.34;
+}
+addEventListener('resize',resize);
+const X=wx=>wx*sc+ox, Y=wy=>wy*sc+oy;
+
+// эффекты
+const fx={ parts:[],
+  splat(x,y,n){ for(let i=0;i<n;i++) this.parts.push({k:'b',x,y,vx:rnd(-50,50),vy:rnd(-90,-15),life:rnd(.4,1),r:rnd(1,2.4)*sc/4}); },
+  spark(x,y){ for(let i=0;i<6;i++) this.parts.push({k:'s',x,y,vx:rnd(-70,70),vy:rnd(-70,10),life:rnd(.15,.35),r:rnd(.8,1.6)}); },
+  step(dt){ for(const p of this.parts){ p.x+=p.vx*dt; p.vy+=380*dt*(p.k==='b'?1:.3); p.y+=p.vy*dt; p.life-=dt;
+      if(p.k==='b'&&p.y>Y(world.laneY+world.laneH/2)){ p.y=Y(world.laneY+world.laneH/2); p.vy=0; p.vx*=.6; } }
+    this.parts=this.parts.filter(p=>p.life>0); } };
+const drops=[];
+
+const trees=[]; function seedDecor(){ trees.length=0; for(let i=0;i<14;i++)
+  trees.push({x:rnd(8,192), y:rnd(6, world.wHeight-6), r:rnd(2.5,4.5)}); }
+
+function drawUnit(u){
+  const x=X(u.x), gy=Y(u.y);
+  const D=u.dir, teamC=u.side==='L'?'#4f7fff':'#ff5040';
+  const H0=clamp(H*0.05, 22, 46);            // высота силуэта в px (≈5% экрана)
+  const fall=u.dead?Math.min(1,u.anim*2):0;
+  ctx.save(); ctx.translate(x,gy);
+  if(fall>0){ ctx.rotate(D*1.3*fall); ctx.translate(0,-2*fall); }
+  const flick=u.flinch>0?(Math.random()*1-.5):0;
+  ctx.translate(flick,0);
+
+  const s=H0/34; // масштаб фигуры
+  const seg=(x1,y1,x2,y2,w)=>{ctx.beginPath();ctx.moveTo(x1*s,y1*s);ctx.lineTo(x2*s,y2*s);ctx.lineWidth=Math.max(1.5,w*s);ctx.stroke();};
+  const dis=k=>u.parts[k].disabled;
+  ctx.strokeStyle='#15110c'; ctx.fillStyle='#15110c'; ctx.lineCap='round';
+  const bob=Math.sin(u.anim*9)*(u.animType==='walk'?2:.6);
+  const sw=u.animType==='strike'?-1.0:u.animType==='windup'?.8:.2;
+  const lunge=(u.animType==='strike'?3:0)*D;
+  ctx.translate(lunge,0);
+  // ноги
+  const ls=u.animType==='walk'?Math.sin(u.anim*9)*3:1.5;
+  if(!dis('leftLeg')) seg(0,-12,-3*D,bob+ls,2.2); if(!dis('rightLeg')) seg(0,-12,3*D,bob-ls,2.2);
+  // торс
+  seg(0,-12,0,-24+bob,3);
+  // левая рука
+  if(!dis('leftArm')) seg(0,-22,-5*D,-16+bob,2);
+  // правая рука + меч
+  const hx=6*D, hy=-22-4+Math.sin(sw)*5;
+  if(!dis('rightArm')){ seg(0,-22,hx,hy,2);
+    if(!u.disarmed){ ctx.strokeStyle='#9a9488'; const a=D>0?sw-1:Math.PI-sw+1;
+      seg(hx, hy, hx+Math.cos(a)*12, hy+Math.sin(a)*12, 1.6); ctx.strokeStyle='#15110c'; } }
+  // голова
+  ctx.beginPath(); ctx.arc(0,(-27+bob)*s,3.2*s,0,7); ctx.fill();
+  // командная обводка
+  ctx.strokeStyle=teamC; ctx.lineWidth=Math.max(1,1.4*s); ctx.beginPath(); ctx.arc(0,(-27+bob)*s,4.6*s,0,7); ctx.stroke();
+  // кровь-маркеры на тяжёлых ранах
+  ctx.restore();
+}
+function drawBase(b,side){
+  const x=X(b.x), y=Y(world.laneY);
+  ctx.fillStyle=side==='L'?'#2a4a8a':'#8a2a2a';
+  ctx.strokeStyle='#15110c'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.rect(x-9, y-22, 18, 30); ctx.fill(); ctx.stroke();
+  // флаг
+  ctx.fillStyle=side==='L'?'#4f7fff':'#ff5040'; ctx.fillRect(x-1,y-34,2,12);
+  ctx.beginPath(); ctx.moveTo(x+1,-34+y); ctx.lineTo(x+9,-30+y); ctx.lineTo(x+1,-26+y); ctx.fill();
+  // HP бар
+  const w=44, hpx=x-w/2, hpy=y-46, f=b.hp/b.max;
+  ctx.fillStyle='#000'; ctx.fillRect(hpx-1,hpy-1,w+2,7);
+  ctx.fillStyle=side==='L'?'#4f7fff':'#ff5040'; ctx.fillRect(hpx,hpy,w*f,5);
+  ctx.fillStyle='#eaddc4'; ctx.font='bold 9px sans-serif'; ctx.textAlign='center';
+  ctx.fillText(Math.ceil(b.hp), x, hpy-3);
+}
+function draw(){
+  // фон-поле
+  const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#3f7a3a'); g.addColorStop(1,'#2c5526');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // дорожка
+  ctx.fillStyle='#b79b6a'; ctx.fillRect(0, Y(world.laneY-world.laneH/2), W, world.laneH*sc);
+  ctx.strokeStyle='#9a7f50'; ctx.lineWidth=1;
+  ctx.strokeRect(0, Y(world.laneY-world.laneH/2), W, world.laneH*sc);
+  // деревья
+  for(const t of trees){ const tx=X(t.x), ty=Y(t.y);
+    ctx.fillStyle='#1f4a1c'; ctx.beginPath(); ctx.arc(tx,ty,t.r*sc,0,7); ctx.fill(); }
+  // лужи крови (осевшие частицы)
+  // базы
+  drawBase(world.leftBase,'L'); drawBase(world.rightBase,'R');
+  // дропы оружия
+  ctx.strokeStyle='#9a9488'; ctx.lineWidth=2;
+  for(const d of drops){ if(d.taken)continue; const dx=X(d.x), dy=Y(d.y);
+    ctx.beginPath(); ctx.moveTo(dx-5,dy); ctx.lineTo(dx+5,dy-3); ctx.stroke(); }
+  // юниты (сначала мёртвые, потом живые сверху)
+  const ordered=[...units].sort((a,b)=>(a.dead?0:1)-(b.dead?0:1)|| a.y-b.y);
+  for(const u of ordered) drawUnit(u);
+  // эффекты
+  for(const p of fx.parts){ ctx.globalAlpha=clamp(p.life*1.5,0,1);
+    ctx.fillStyle=p.k==='b'?'#9c1410':'#ffd86a'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,7); ctx.fill(); }
+  ctx.globalAlpha=1;
+}
+
+/* ============================================================================
+   §7 МЕНЕДЖЕР ПОЛЯ + ЦИКЛ
+   ============================================================================ */
+let units=[], paused=false, speed=1, last=0, spawnTimer={L:0,R:0}, over=false;
+const stats={lKills:0,rKills:0};
+const SPEEDS=[1,1.25,2,3]; let spIdx=0;
+
+function reset(){
+  resize(); seedDecor(); UID=0; units=[]; fx.parts=[]; drops.length=0; over=false;
+  stats.lKills=stats.rKills=0;
+  world.leftBase.hp=world.leftBase.max; world.rightBase.hp=world.rightBase.max;
+  spawnTimer.L=spawnTimer.R=0;
+  for(let i=0;i<4;i++){ units.push(makeUnit('L')); units.push(makeUnit('R')); }
+}
+function spawnWaves(dt){
+  for(const side of ['L','R']){
+    spawnTimer[side]-=dt;
+    if(spawnTimer[side]<=0){ spawnTimer[side]=rnd(1.4,2.6);
+      const n=units.filter(u=>!u.dead&&u.side===side).length;
+      if(n<14) units.push(makeUnit(side)); }
+  }
+}
+function separate(){ // лёгкое расталкивание по дорожке
+  for(let i=0;i<units.length;i++){ const a=units[i]; if(a.dead)continue;
+    for(let j=i+1;j<units.length;j++){ const b=units[j]; if(b.dead)continue;
+      const dx=b.x-a.x, dy=b.y-a.y, d=Math.hypot(dx,dy);
+      if(d>0 && d<5){ const p=(5-d)/d*0.5; a.x-=dx*p*0.5; a.y-=dy*p*0.5; b.x+=dx*p*0.5; b.y+=dy*p*0.5; } } }
+}
+function checkEnd(){ if(over)return;
+  if(world.leftBase.hp<=0||world.rightBase.hp<=0){ over=true;
+    document.getElementById('score').textContent =
+      world.leftBase.hp<=0 ? '🏆 Победа красных' : '🏆 Победа синих'; }
+}
+
+function loop(ts){
+  requestAnimationFrame(loop);
+  let dt=(ts-last)/1000; last=ts; if(dt>.05)dt=.05; dt*=speed;
+  if(!paused && !over){
+    spawnWaves(dt);
+    for(const u of units) think(u,dt);
+    separate();
+    // подчистка дропов
+    for(const d of drops){ d.t+=dt; d.y+=d.vy; d.vy=Math.min(d.vy+0.2,0); }
+    units=units.filter(u=>!(u.dead && u.anim>4)); // убрать старые трупы
+    fx.step(dt);
+    checkEnd();
+    // счёт
+    if(!over) document.getElementById('score').textContent =
+      `🔵 ${stats.lKills}   |   ${Math.ceil(world.leftBase.hp)} ⚔ ${Math.ceil(world.rightBase.hp)}   |   ${stats.rKills} 🔴`;
+  } else { fx.step(dt); }
+  // обновить экранные координаты для эффектов из applyHit
+  for(const u of units){ u.sx=X(u.x); u.sy=Y(u.y); }
+  draw();
+}
+
+// ---------- управление ----------
+document.getElementById('bSpeed').onclick=e=>{ spIdx=(spIdx+1)%SPEEDS.length; speed=SPEEDS[spIdx]; e.target.textContent='▶ x'+speed; };
+document.getElementById('bPause').onclick=e=>{ paused=!paused; e.target.classList.toggle('on',paused); e.target.textContent=paused?'▶ Дальше':'⏸ Пауза'; };
+document.getElementById('bL').onclick=()=>{ if(!over) units.push(makeUnit('L')); };
+document.getElementById('bR').onclick=()=>{ if(!over) units.push(makeUnit('R')); };
+document.getElementById('bReset').onclick=()=>{ reset(); };
+
+reset(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
