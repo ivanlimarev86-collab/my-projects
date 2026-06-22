@@ -1,0 +1,48 @@
+{
+  "_comment": "Схема ассетов для sprite-бэкенда рендера. Это то, что заполняет твой API генерации картинок/анимаций. Логику боя НЕ трогает. Пути image — относительно папки ассетов. См. VISUAL-ANIM-ARCH.md.",
+
+  "units": {
+    "soldier": {
+      "size": { "heightPx": 64, "anchor": [0.5, 1.0] },
+
+      "clips": {
+        "idle":        { "image": "soldier/idle.png",        "frameSize": [64,64], "frames": 4, "fps": 6,  "loop": true },
+        "walk":        { "image": "soldier/walk.png",        "frameSize": [64,64], "frames": 6, "fps": 12, "loop": true },
+
+        "windup_high": { "image": "soldier/windup_high.png", "frameSize": [64,64], "frames": 3, "fps": 8,  "loop": false },
+        "windup_mid":  { "image": "soldier/windup_mid.png",  "frameSize": [64,64], "frames": 3, "fps": 8,  "loop": false },
+        "windup_low":  { "image": "soldier/windup_low.png",  "frameSize": [64,64], "frames": 3, "fps": 8,  "loop": false },
+
+        "strike_high": { "image": "soldier/strike_high.png", "frameSize": [64,64], "frames": 5, "fps": 18, "loop": false,
+                         "events": { "3": "hit" },
+                         "attach": { "handR": [[44,28],[48,24],[50,30],[46,38],[42,40]] } },
+        "strike_mid":  { "image": "soldier/strike_mid.png",  "frameSize": [64,64], "frames": 5, "fps": 18, "loop": false,
+                         "events": { "3": "hit" },
+                         "attach": { "handR": [[44,32],[50,32],[54,32],[48,32],[44,32]] } },
+        "strike_low":  { "image": "soldier/strike_low.png",  "frameSize": [64,64], "frames": 5, "fps": 18, "loop": false,
+                         "events": { "3": "hit" } },
+
+        "block":       { "image": "soldier/block.png",       "frameSize": [64,64], "frames": 2, "fps": 10, "loop": false },
+        "hit":         { "image": "soldier/hit.png",         "frameSize": [64,64], "frames": 3, "fps": 12, "loop": false },
+        "prone":       { "image": "soldier/prone.png",       "frameSize": [64,64], "frames": 1, "fps": 1,  "loop": true },
+        "dead":        { "image": "soldier/dead.png",        "frameSize": [64,64], "frames": 4, "fps": 10, "loop": false }
+      },
+
+      "weapon": { "image": "weapons/sword.png", "size": [10,34], "grip": [5,30] },
+
+      "parts": {
+        "comment": "опционально: оверлеи состояний части тела поверх базового спрайта",
+        "rightArm": { "wounded": "fx/wound_arm.png", "severed": "fx/stump_arm.png", "frozen": "fx/frost_arm.png" },
+        "head":     { "impaled": "fx/arrow_head.png" }
+      }
+    }
+  },
+
+  "fx": {
+    "blood": "fx/blood.png",
+    "spark": "fx/spark.png",
+    "frost": "fx/frost.png",
+    "fire":  "fx/fire.png",
+    "arrow": "fx/arrow.png"
+  }
+}
