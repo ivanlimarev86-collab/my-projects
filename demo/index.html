@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Disciples — движок боя (демо)</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;}
+  html,body{height:100%;background:#0e0b08;overflow:hidden;font-family:"Trebuchet MS",system-ui,sans-serif;color:#eaddc4;}
+  #wrap{display:flex;flex-direction:column;height:100%;max-width:480px;margin:0 auto;}
+  #field{flex:1;width:100%;display:block;touch-action:none;}
+  #top{position:absolute;top:0;left:0;right:0;display:flex;justify-content:center;gap:10px;padding:6px;pointer-events:none;}
+  #top .pill{background:rgba(0,0,0,.45);border:1px solid #4a3826;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:bold;}
+  #ctrl{display:flex;flex-wrap:wrap;gap:6px;padding:7px;background:#1c150e;border-top:1px solid #4a3826;}
+  button{flex:1;min-width:70px;padding:10px 4px;font-size:12px;font-weight:bold;color:#eaddc4;background:#3a2c20;border:1px solid #5a4533;border-radius:9px;}
+  button:active,button.on{background:#6a5030;}
+  .row{display:flex;align-items:center;gap:8px;width:100%;font-size:11px;color:#bba;}
+  input[type=range]{flex:1;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="field"></canvas>
+  <div id="top"><div class="pill" id="score">Битва</div></div>
+  <div id="ctrl">
+    <button id="bSpeed">▶ x1</button>
+    <button id="bPause">⏸ Пауза</button>
+    <button id="bL">＋ синие</button>
+    <button id="bR">＋ красные</button>
+    <button id="bReset">⟳ Заново</button>
+    <div class="row">Размер юнитов <input id="size" type="range" min="0.6" max="2" step="0.1" value="1"><span id="sizeV">1.0×</span></div>
+  </div>
+</div>
+<script type="module">
+import { Battle, SilhouetteRenderer, FX, makeView } from '../engine/index.js';
+
+const cv = document.getElementById('field'), ctx = cv.getContext('2d');
+const view = makeView();
+let battle, renderer = new SilhouetteRenderer(), fx;
+
+function resize() {
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  view.W = r.width; view.H = r.height; view.sc = r.width / 200; view.ox = 0; view.oy = 0;
+  if (battle) { battle.setViewportWorld(view.H / view.sc); view.laneY = battle.world.laneY;
+    for (const u of battle.units){ u.laneMin = battle.world.laneY - battle.world.laneH/2; u.laneMax = battle.world.laneY + battle.world.laneH/2; } }
+}
+addEventListener('resize', resize);
+
+function start() {
+  battle = new Battle({ seed: Date.now() & 0xffff });
+  resize();
+  fx = new FX(); fx.bind(battle.emitter, view);
+  battle.emitter.on('over', e => { document.getElementById('score').textContent =
+    '🏆 Победа ' + (e.winner === 'L' ? 'синих' : 'красных'); });
+  for (let i=0;i<4;i++){ battle.createUnit('L', battle.rng.pick(battle.spawnPool)); battle.createUnit('R', battle.rng.pick(battle.spawnPool)); }
+}
+
+const SPEEDS=[1,1.25,2,3]; let spIdx=0, speed=1, paused=false, last=0;
+function loop(ts){
+  requestAnimationFrame(loop);
+  let dt=(ts-last)/1000; last=ts; if(dt>.05)dt=.05; dt*=speed;
+  if(!paused){ battle.tick(dt); fx.step(dt, view.Y(battle.world.laneY + battle.world.laneH/2)); }
+  battle.render(ctx, view, renderer, fx);
+  if(!battle.over){ const s=battle.stats;
+    document.getElementById('score').textContent =
+      `🔵 ${s.lKills}  |  ${Math.ceil(battle.leftBase.hp)} ⚔ ${Math.ceil(battle.rightBase.hp)}  |  ${s.rKills} 🔴`; }
+}
+
+document.getElementById('bSpeed').onclick=e=>{ spIdx=(spIdx+1)%SPEEDS.length; speed=SPEEDS[spIdx]; e.target.textContent='▶ x'+speed; };
+document.getElementById('bPause').onclick=e=>{ paused=!paused; e.target.classList.toggle('on',paused); e.target.textContent=paused?'▶ Дальше':'⏸ Пауза'; };
+document.getElementById('bL').onclick=()=>{ if(!battle.over) battle.createUnit('L', battle.rng.pick(battle.spawnPool)); };
+document.getElementById('bR').onclick=()=>{ if(!battle.over) battle.createUnit('R', battle.rng.pick(battle.spawnPool)); };
+document.getElementById('bReset').onclick=()=> start();
+const sizeEl=document.getElementById('size');
+sizeEl.oninput=()=>{ view.unitScale=parseFloat(sizeEl.value); document.getElementById('sizeV').textContent=view.unitScale.toFixed(1)+'×'; };
+view.unitScale=1;
+
+start(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
